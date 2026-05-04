@@ -1,388 +1,308 @@
 from __future__ import annotations
 
-import os
-import time
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd
-import requests
-from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 IMAGES_DIR = BASE_DIR / "images"
-RAW_DATA_PATH = DATA_DIR / "github_repositories.csv"
-STATS_DATA_PATH = DATA_DIR / "github_language_stats.csv"
 
-GITHUB_API_URL = "https://api.github.com/search/repositories"
-DEFAULT_LANGUAGES = ["Python", "JavaScript", "Java", "Go", "Rust", "Kotlin"]
-DEFAULT_YEARS = list(range(2015, 2026))
-REQUEST_TIMEOUT = 30
-REQUEST_PAUSE_SECONDS = 2
-RESULTS_PER_PAGE = 100
+RAW_DATA_PATH = DATA_DIR / "wordstat_dynamics_raw.csv"
+MONTHLY_INDEX_PATH = DATA_DIR / "wordstat_monthly_index.csv"
+LATEST_RANKING_PATH = DATA_DIR / "wordstat_latest_ranking.csv"
+
+RAW_COUNTS_CHART = IMAGES_DIR / "wordstat_raw_counts_by_month.png"
+SHARE_CHART = IMAGES_DIR / "wordstat_share_by_month.png"
+SMOOTHED_SHARE_CHART = IMAGES_DIR / "wordstat_smoothed_share_by_month.png"
+LATEST_SHARE_CHART = IMAGES_DIR / "wordstat_latest_share.png"
+YEARLY_TREND_CHART = IMAGES_DIR / "wordstat_yearly_trend.png"
+
+BASE_LANGUAGE = "Java"
+SMOOTHING_WINDOW = 6
+TREND_WINDOW = 12
+
+
+@dataclass(frozen=True)
+class SummaryResult:
+    latest_month: pd.Timestamp
+    leader_by_share: str
+    leader_share_value: float
+    fastest_growth_language: str
+    fastest_growth_value: float
+    highest_average_share_language: str
+    highest_average_share_value: float
 
 
 def ensure_directories() -> None:
-    """Create folders for data and charts if they do not exist yet."""
     DATA_DIR.mkdir(exist_ok=True)
     IMAGES_DIR.mkdir(exist_ok=True)
 
 
-def create_session(token: str | None) -> requests.Session:
-    """Create a configured session for GitHub API requests."""
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "github-language-popularity-analysis",
-        }
+def load_raw_data() -> pd.DataFrame:
+    if not RAW_DATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Raw data file not found: {RAW_DATA_PATH}. "
+            "Run `python load_wordstat.py` first."
+        )
+
+    df = pd.read_csv(RAW_DATA_PATH)
+    required_columns = {"language", "phrase", "date", "count", "share"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise ValueError(
+            "The raw CSV does not contain required columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    df["date"] = pd.to_datetime(df["date"])
+    df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0)
+    df["share"] = pd.to_numeric(df["share"], errors="coerce").fillna(0)
+    return df.sort_values(["language", "date"]).reset_index(drop=True)
+
+
+def build_monthly_index(raw_df: pd.DataFrame) -> pd.DataFrame:
+    monthly = raw_df[["language", "phrase", "date", "count", "share"]].copy()
+
+    java_counts = (
+        monthly[monthly["language"] == BASE_LANGUAGE][["date", "count"]]
+        .rename(columns={"count": "java_count"})
+        .drop_duplicates(subset=["date"])
     )
 
-    if token:
-        session.headers["Authorization"] = f"Bearer {token}"
-    else:
-        print("Warning: GITHUB_TOKEN not found. Requests will use lower rate limits.")
+    if java_counts.empty:
+        raise ValueError("Base language Java is missing from the raw dataset.")
 
-    return session
+    monthly = monthly.merge(java_counts, on="date", how="left")
+    monthly["relative_to_java"] = monthly["count"] / monthly["java_count"]
 
-
-def wait_for_rate_limit(response: requests.Response) -> None:
-    """Pause execution until the GitHub API rate limit resets."""
-    remaining = response.headers.get("X-RateLimit-Remaining")
-    reset_timestamp = response.headers.get("X-RateLimit-Reset")
-
-    if remaining != "0" or not reset_timestamp:
-        return
-
-    reset_time = datetime.fromtimestamp(int(reset_timestamp))
-    wait_seconds = max(int(reset_timestamp) - int(time.time()) + 1, 1)
-    print(
-        "GitHub API rate limit reached. "
-        f"Waiting {wait_seconds} seconds until {reset_time}."
+    relative_totals = (
+        monthly.groupby("date", as_index=False)["relative_to_java"]
+        .sum()
+        .rename(columns={"relative_to_java": "relative_total"})
     )
-    time.sleep(wait_seconds)
+    monthly = monthly.merge(relative_totals, on="date", how="left")
+    monthly["share_pct"] = monthly["relative_to_java"] / monthly["relative_total"] * 100
 
-
-def build_search_query(language: str, year: int) -> str:
-    """Build GitHub Search API query for a single language and year."""
-    start_date = f"{year}-01-01"
-    end_date = f"{year}-12-31"
-    return f"language:{language} created:{start_date}..{end_date}"
-
-
-def fetch_repositories_for_year(
-    session: requests.Session, language: str, year: int
-) -> list[dict]:
-    """
-    Fetch one page of repositories for a language and year.
-
-    For a study project we intentionally limit the sample to the first page
-    (up to 100 repositories) for each language-year pair.
-    """
-    params = {
-        "q": build_search_query(language, year),
-        "sort": "stars",
-        "order": "desc",
-        "per_page": RESULTS_PER_PAGE,
-        "page": 1,
-    }
-
-    print(f"Requesting data for {language}, {year}...")
-
-    try:
-        response = session.get(GITHUB_API_URL, params=params, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as error:
-        print(f"Request failed for {language}, {year}: {error}")
-        return []
-
-    if response.status_code == 403:
-        wait_for_rate_limit(response)
-        try:
-            response = session.get(GITHUB_API_URL, params=params, timeout=REQUEST_TIMEOUT)
-        except requests.RequestException as error:
-            print(f"Retry failed for {language}, {year}: {error}")
-            return []
-
-    if response.status_code != 200:
-        print(
-            f"GitHub API returned status {response.status_code} "
-            f"for {language}, {year}: {response.text}"
-        )
-        return []
-
-    try:
-        payload = response.json()
-    except ValueError:
-        print(f"Failed to parse JSON response for {language}, {year}.")
-        return []
-
-    return payload.get("items", [])
-
-
-def transform_repositories(language: str, items: Iterable[dict]) -> list[dict]:
-    """Convert GitHub API items into rows for a pandas DataFrame."""
-    rows: list[dict] = []
-
-    for item in items:
-        created_at = item.get("created_at", "")
-        year = created_at[:4] if created_at else None
-
-        rows.append(
-            {
-                "repository_name": item.get("full_name"),
-                "language": language,
-                "created_at": created_at,
-                "created_year": int(year) if year else None,
-                "stars": item.get("stargazers_count", 0),
-                "forks": item.get("forks_count", 0),
-                "open_issues": item.get("open_issues_count", 0),
-                "html_url": item.get("html_url"),
-                "description": item.get("description") or "",
-            }
-        )
-
-    return rows
-
-
-def collect_data(
-    languages: list[str], years: list[int], session: requests.Session
-) -> pd.DataFrame:
-    """Collect repository data for all requested languages and years."""
-    all_rows: list[dict] = []
-
-    for language in languages:
-        for year in years:
-            items = fetch_repositories_for_year(session, language, year)
-            rows = transform_repositories(language, items)
-            all_rows.extend(rows)
-            print(f"Collected {len(rows)} repositories for {language}, {year}.")
-            time.sleep(REQUEST_PAUSE_SECONDS)
-
-    return pd.DataFrame(all_rows)
-
-
-def aggregate_data(repositories_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate summary statistics by language and year."""
-    if repositories_df.empty:
-        return pd.DataFrame(
-            columns=[
-                "language",
-                "created_year",
-                "repositories_count",
-                "total_stars",
-                "average_stars",
-                "average_forks",
-            ]
-        )
-
-    stats_df = (
-        repositories_df.groupby(["language", "created_year"], as_index=False)
-        .agg(
-            repositories_count=("repository_name", "count"),
-            total_stars=("stars", "sum"),
-            average_stars=("stars", "mean"),
-            average_forks=("forks", "mean"),
-        )
-        .sort_values(["language", "created_year"])
+    monthly["smoothed_share_pct"] = (
+        monthly.sort_values(["language", "date"])
+        .groupby("language")["share_pct"]
+        .transform(lambda s: s.rolling(window=SMOOTHING_WINDOW, min_periods=1).mean())
+    )
+    monthly["count_change_pct"] = (
+        monthly.sort_values(["language", "date"])
+        .groupby("language")["count"]
+        .pct_change()
+        .mul(100)
     )
 
-    stats_df["average_stars"] = stats_df["average_stars"].round(2)
-    stats_df["average_forks"] = stats_df["average_forks"].round(2)
-    return stats_df
+    monthly["share_pct"] = monthly["share_pct"].round(4)
+    monthly["smoothed_share_pct"] = monthly["smoothed_share_pct"].round(4)
+    monthly["relative_to_java"] = monthly["relative_to_java"].round(6)
+    monthly["count_change_pct"] = monthly["count_change_pct"].round(4)
+    return monthly.sort_values(["date", "language"]).reset_index(drop=True)
 
 
-def plot_metric_by_year(
-    stats_df: pd.DataFrame,
-    metric: str,
-    title: str,
-    ylabel: str,
-    output_path: Path,
-) -> None:
-    """Create a line chart for one metric over years."""
-    if stats_df.empty:
-        print(f"Skipping chart {output_path.name}: no data available.")
-        return
+def calculate_trend(series: pd.Series) -> float:
+    clean_series = series.dropna()
+    if len(clean_series) < 2:
+        return 0.0
 
+    if len(clean_series) > TREND_WINDOW:
+        clean_series = clean_series.iloc[-TREND_WINDOW:]
+
+    x_values = pd.Series(range(len(clean_series)), dtype="float64")
+    y_values = clean_series.reset_index(drop=True).astype("float64")
+
+    x_mean = x_values.mean()
+    y_mean = y_values.mean()
+
+    numerator = ((x_values - x_mean) * (y_values - y_mean)).sum()
+    denominator = ((x_values - x_mean) ** 2).sum()
+
+    if denominator == 0:
+        return 0.0
+
+    monthly_slope = numerator / denominator
+    return round(monthly_slope * 12, 4)
+
+
+def build_latest_ranking(monthly_index_df: pd.DataFrame) -> pd.DataFrame:
+    latest_month = monthly_index_df["date"].max()
+    latest_df = monthly_index_df[monthly_index_df["date"] == latest_month].copy()
+
+    average_share = (
+        monthly_index_df.groupby("language", as_index=False)["share_pct"]
+        .mean()
+        .rename(columns={"share_pct": "average_share_pct"})
+    )
+    trends = (
+        monthly_index_df.groupby("language")["smoothed_share_pct"]
+        .apply(calculate_trend)
+        .reset_index(name="yearly_trend_pp")
+    )
+
+    latest_df = latest_df.merge(average_share, on="language", how="left")
+    latest_df = latest_df.merge(trends, on="language", how="left")
+    latest_df = latest_df.sort_values("share_pct", ascending=False).reset_index(drop=True)
+
+    latest_df["average_share_pct"] = latest_df["average_share_pct"].round(4)
+    latest_df["yearly_trend_pp"] = latest_df["yearly_trend_pp"].round(4)
+    return latest_df
+
+
+def plot_raw_counts(monthly_index_df: pd.DataFrame) -> None:
     plt.figure(figsize=(12, 7))
+    for language in monthly_index_df["language"].unique():
+        language_df = monthly_index_df[monthly_index_df["language"] == language]
+        plt.plot(language_df["date"], language_df["count"], marker="o", linewidth=2, label=language)
 
-    for language in stats_df["language"].unique():
-        language_data = stats_df[stats_df["language"] == language]
-        plt.plot(
-            language_data["created_year"],
-            language_data[metric],
-            marker="o",
-            linewidth=2,
-            label=language,
-        )
-
-    plt.title(title)
-    plt.xlabel("Year")
-    plt.ylabel(ylabel)
-    plt.xticks(sorted(stats_df["created_year"].unique()), rotation=45)
+    plt.title("Yandex Wordstat Query Counts by Month")
+    plt.xlabel("Month")
+    plt.ylabel("Query count")
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(output_path)
+    plt.savefig(RAW_COUNTS_CHART)
     plt.close()
 
 
-def plot_total_bar_chart(
-    totals_df: pd.DataFrame,
-    metric: str,
-    title: str,
-    ylabel: str,
-    output_path: Path,
-) -> None:
-    """Create a bar chart that compares languages by total metric."""
-    if totals_df.empty:
-        print(f"Skipping chart {output_path.name}: no data available.")
-        return
+def plot_share(monthly_index_df: pd.DataFrame) -> None:
+    plt.figure(figsize=(12, 7))
+    for language in monthly_index_df["language"].unique():
+        language_df = monthly_index_df[monthly_index_df["language"] == language]
+        plt.plot(language_df["date"], language_df["share_pct"], marker="o", linewidth=2, label=language)
 
+    plt.title("PYPL-like Share of Tutorial Searches by Month")
+    plt.xlabel("Month")
+    plt.ylabel("Share, %")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(SHARE_CHART)
+    plt.close()
+
+
+def plot_smoothed_share(monthly_index_df: pd.DataFrame) -> None:
+    plt.figure(figsize=(12, 7))
+    for language in monthly_index_df["language"].unique():
+        language_df = monthly_index_df[monthly_index_df["language"] == language]
+        plt.plot(
+            language_df["date"],
+            language_df["smoothed_share_pct"],
+            linewidth=2.5,
+            label=language,
+        )
+
+    plt.title("Smoothed PYPL-like Share by Month (6-month average)")
+    plt.xlabel("Month")
+    plt.ylabel("Smoothed share, %")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(SMOOTHED_SHARE_CHART)
+    plt.close()
+
+
+def plot_latest_share(latest_ranking_df: pd.DataFrame) -> None:
     plt.figure(figsize=(10, 6))
-    plt.bar(totals_df["language"], totals_df[metric], color="steelblue")
-    plt.title(title)
+    plt.bar(latest_ranking_df["language"], latest_ranking_df["share_pct"], color="steelblue")
+    plt.title("Latest Month Share of Tutorial Searches")
     plt.xlabel("Programming language")
-    plt.ylabel(ylabel)
+    plt.ylabel("Share, %")
     plt.xticks(rotation=45)
     plt.tight_layout()
-    plt.savefig(output_path)
+    plt.savefig(LATEST_SHARE_CHART)
     plt.close()
 
 
-def create_visualizations(stats_df: pd.DataFrame) -> None:
-    """Build and save all required charts."""
-    plot_metric_by_year(
-        stats_df,
-        metric="repositories_count",
-        title="Repositories by Year",
-        ylabel="Number of repositories",
-        output_path=IMAGES_DIR / "repositories_by_year.png",
-    )
-    plot_metric_by_year(
-        stats_df,
-        metric="total_stars",
-        title="Total Stars by Year",
-        ylabel="Total stars",
-        output_path=IMAGES_DIR / "stars_by_year.png",
-    )
-    plot_metric_by_year(
-        stats_df,
-        metric="average_stars",
-        title="Average Stars by Year",
-        ylabel="Average stars",
-        output_path=IMAGES_DIR / "average_stars_by_year.png",
-    )
+def plot_yearly_trend(latest_ranking_df: pd.DataFrame) -> None:
+    sorted_df = latest_ranking_df.sort_values("yearly_trend_pp", ascending=False)
+    plt.figure(figsize=(10, 6))
+    plt.bar(sorted_df["language"], sorted_df["yearly_trend_pp"], color="darkorange")
+    plt.title("Estimated Yearly Trend of Smoothed Share")
+    plt.xlabel("Programming language")
+    plt.ylabel("Trend, percentage points per year")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(YEARLY_TREND_CHART)
+    plt.close()
 
-    totals_df = (
-        stats_df.groupby("language", as_index=False)
-        .agg(
-            total_repositories=("repositories_count", "sum"),
-            total_stars=("total_stars", "sum"),
-        )
-        .sort_values("total_repositories", ascending=False)
-    )
 
-    plot_total_bar_chart(
-        totals_df,
-        metric="total_repositories",
-        title="Total Repositories by Language",
-        ylabel="Repositories",
-        output_path=IMAGES_DIR / "total_repositories_by_language.png",
+def create_visualizations(monthly_index_df: pd.DataFrame, latest_ranking_df: pd.DataFrame) -> None:
+    plot_raw_counts(monthly_index_df)
+    plot_share(monthly_index_df)
+    plot_smoothed_share(monthly_index_df)
+    plot_latest_share(latest_ranking_df)
+    plot_yearly_trend(latest_ranking_df)
+
+
+def summarize_results(monthly_index_df: pd.DataFrame, latest_ranking_df: pd.DataFrame) -> SummaryResult:
+    latest_month = latest_ranking_df["date"].max()
+    leader_row = latest_ranking_df.loc[latest_ranking_df["share_pct"].idxmax()]
+    growth_row = latest_ranking_df.loc[latest_ranking_df["yearly_trend_pp"].idxmax()]
+
+    average_share = (
+        monthly_index_df.groupby("language", as_index=False)["share_pct"]
+        .mean()
+        .sort_values("share_pct", ascending=False)
+        .reset_index(drop=True)
     )
-    plot_total_bar_chart(
-        totals_df.sort_values("total_stars", ascending=False),
-        metric="total_stars",
-        title="Total Stars by Language",
-        ylabel="Stars",
-        output_path=IMAGES_DIR / "total_stars_by_language.png",
+    average_row = average_share.iloc[0]
+
+    return SummaryResult(
+        latest_month=latest_month,
+        leader_by_share=str(leader_row["language"]),
+        leader_share_value=float(leader_row["share_pct"]),
+        fastest_growth_language=str(growth_row["language"]),
+        fastest_growth_value=float(growth_row["yearly_trend_pp"]),
+        highest_average_share_language=str(average_row["language"]),
+        highest_average_share_value=float(round(average_row["share_pct"], 4)),
     )
 
 
-def print_conclusions(stats_df: pd.DataFrame) -> None:
-    """Print short text conclusions based on aggregated data."""
-    print("\nConclusions:")
-
-    if stats_df.empty:
-        print("No data was collected, so conclusions cannot be generated.")
-        print("- Possible reasons: API errors, rate limits, or network problems.")
-        return
-
-    totals_df = (
-        stats_df.groupby("language", as_index=False)
-        .agg(
-            total_repositories=("repositories_count", "sum"),
-            total_stars=("total_stars", "sum"),
-            mean_average_stars=("average_stars", "mean"),
-        )
-    )
-
-    most_common_language = totals_df.loc[
-        totals_df["total_repositories"].idxmax(), "language"
-    ]
-    most_starred_language = totals_df.loc[totals_df["total_stars"].idxmax(), "language"]
-    highest_average_stars_language = totals_df.loc[
-        totals_df["mean_average_stars"].idxmax(), "language"
-    ]
-
-    print(f"- Most frequent language in the sample: {most_common_language}.")
-    print(f"- Language with the highest total stars: {most_starred_language}.")
+def print_summary(summary: SummaryResult) -> None:
+    print("\nPYPL-like summary based on Yandex Wordstat:")
+    print(f"- Latest month in the dataset: {summary.latest_month.date()}")
     print(
-        "- Language with the highest average stars per repository: "
-        f"{highest_average_stars_language}."
+        f"- Leader by latest search share: {summary.leader_by_share} "
+        f"({summary.leader_share_value:.2f}%)"
     )
-
-    growth_languages: list[str] = []
-    for language in stats_df["language"].unique():
-        language_data = stats_df[stats_df["language"] == language].sort_values(
-            "created_year"
-        )
-        if len(language_data) >= 2:
-            first_value = language_data.iloc[0]["repositories_count"]
-            last_value = language_data.iloc[-1]["repositories_count"]
-            if last_value > first_value:
-                growth_languages.append(language)
-
-    if growth_languages:
-        print(
-            "- Languages that show growth in repository count in the sample: "
-            + ", ".join(growth_languages)
-            + "."
-        )
-    else:
-        print("- Clear growth by repository count was not detected in the sample.")
-
-    print("- Analysis limitations:")
-    print("  1. The study uses a sample, not the entire GitHub platform.")
-    print("  2. Only the first page of Search API results is used for each language and year.")
-    print("  3. Only public repositories are included.")
-    print("  4. Stars reflect attention, but not necessarily real usage.")
-    print("  5. Older repositories had more time to accumulate stars.")
+    print(
+        f"- Fastest growth by smoothed yearly trend: {summary.fastest_growth_language} "
+        f"({summary.fastest_growth_value:.2f} percentage points per year)"
+    )
+    print(
+        f"- Highest average share over the whole period: {summary.highest_average_share_language} "
+        f"({summary.highest_average_share_value:.2f}%)"
+    )
+    print("- Limitations:")
+    print("  1. The source is Yandex Wordstat, not Google Trends.")
+    print("  2. The method is PYPL-like, not the official PYPL index.")
+    print("  3. Historical monthly data in Wordstat starts from 2018.")
+    print("  4. Results depend on the chosen tutorial phrases.")
+    print("  5. Search interest is a leading indicator, not direct language usage.")
 
 
 def main() -> None:
-    """Run the full data collection and analysis pipeline."""
-    load_dotenv()
     ensure_directories()
+    raw_df = load_raw_data()
+    monthly_index_df = build_monthly_index(raw_df)
+    latest_ranking_df = build_latest_ranking(monthly_index_df)
 
-    token = os.getenv("GITHUB_TOKEN")
-    session = create_session(token)
+    monthly_index_df.to_csv(MONTHLY_INDEX_PATH, index=False, encoding="utf-8")
+    latest_ranking_df.to_csv(LATEST_RANKING_PATH, index=False, encoding="utf-8")
 
-    repositories_df = collect_data(DEFAULT_LANGUAGES, DEFAULT_YEARS, session)
-    repositories_df.to_csv(RAW_DATA_PATH, index=False, encoding="utf-8")
-    print(f"Raw data saved to: {RAW_DATA_PATH}")
+    create_visualizations(monthly_index_df, latest_ranking_df)
+    summary = summarize_results(monthly_index_df, latest_ranking_df)
+    print_summary(summary)
 
-    stats_df = aggregate_data(repositories_df)
-    stats_df.to_csv(STATS_DATA_PATH, index=False, encoding="utf-8")
-    print(f"Aggregated data saved to: {STATS_DATA_PATH}")
-
-    create_visualizations(stats_df)
-    print(f"Charts saved to: {IMAGES_DIR}")
-
-    print_conclusions(stats_df)
+    print(f"\nSaved processed monthly index to: {MONTHLY_INDEX_PATH}")
+    print(f"Saved latest ranking to: {LATEST_RANKING_PATH}")
+    print(f"Saved charts to: {IMAGES_DIR}")
 
 
 if __name__ == "__main__":

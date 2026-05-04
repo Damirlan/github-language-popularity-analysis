@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+
+# Generated datasets
+data/*.csv
+!data/.gitkeep
+
+# Generated images
+images/*.png
+!images/.gitkeep

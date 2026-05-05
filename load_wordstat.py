@@ -13,19 +13,45 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 RAW_DATA_PATH = DATA_DIR / "wordstat_dynamics_raw.csv"
+PYPL_REFERENCE_PATH = DATA_DIR / "pypl_reference.csv"
 
 WORDSTAT_DYNAMICS_URL = "https://searchapi.api.cloud.yandex.net/v2/wordstat/dynamics"
 REQUEST_TIMEOUT = 30
 REQUEST_PAUSE_SECONDS = 1
 START_DATE = "2018-01-01"
 
-LANGUAGE_PHRASES = {
-    "Python": "python tutorial",
-    "JavaScript": "javascript tutorial",
-    "Java": "java tutorial",
+# Phrases are aligned to the language names imported from the PYPL table.
+PHRASE_OVERRIDES = {
+    "Abap": "abap tutorial",
+    "Ada": "ada tutorial",
+    "C/C++": "c++ tutorial",
+    "C#": "c# tutorial",
+    "Cobol": "cobol tutorial",
+    "Dart": "dart tutorial",
+    "Delphi/Pascal": "delphi tutorial",
     "Go": "golang tutorial",
-    "Rust": "rust tutorial",
+    "Groovy": "groovy tutorial",
+    "Haskell": "haskell tutorial",
+    "Java": "java tutorial",
+    "JavaScript": "javascript tutorial",
+    "Julia": "julia tutorial",
     "Kotlin": "kotlin tutorial",
+    "Lua": "lua tutorial",
+    "Matlab": "matlab tutorial",
+    "Objective-C": "objective-c tutorial",
+    "Perl": "perl tutorial",
+    "PHP": "php tutorial",
+    "Powershell": "powershell tutorial",
+    "Python": "python tutorial",
+    "R": "r language tutorial",
+    "Ruby": "ruby tutorial",
+    "Rust": "rust tutorial",
+    "Scala": "scala tutorial",
+    "Swift": "swift tutorial",
+    "TypeScript": "typescript tutorial",
+    "VBA": "vba tutorial",
+    "Visual Basic": "visual basic tutorial",
+    "Zig": "zig tutorial",
 }
 
 
@@ -39,6 +65,26 @@ def last_day_of_previous_month() -> str:
 def to_rfc3339(date_string: str, end_of_day: bool = False) -> str:
     suffix = "T23:59:59Z" if end_of_day else "T00:00:00Z"
     return f"{date_string}{suffix}"
+
+
+def build_phrase(language: str) -> str:
+    if language in PHRASE_OVERRIDES:
+        return PHRASE_OVERRIDES[language]
+    return f"{language.lower()} tutorial"
+
+
+def load_languages_from_pypl() -> list[str]:
+    if not PYPL_REFERENCE_PATH.exists():
+        raise FileNotFoundError(
+            f"PYPL reference file not found: {PYPL_REFERENCE_PATH}. "
+            "Run `python import_pypl_table.py` first."
+        )
+
+    pypl_df = pd.read_csv(PYPL_REFERENCE_PATH)
+    languages = [column for column in pypl_df.columns if column != "date"]
+    if not languages:
+        raise ValueError("No languages were found in pypl_reference.csv.")
+    return languages
 
 
 def create_session(token: str, auth_type: str) -> requests.Session:
@@ -85,8 +131,7 @@ def fetch_phrase_dynamics(
         return []
 
     if response.status_code == 429:
-        retry_after = response.text
-        print(f"Quota limit exceeded for {language}: {retry_after}")
+        print(f"Quota limit exceeded for {language}: {response.text}")
         return []
 
     if response.status_code == 503:
@@ -104,12 +149,6 @@ def fetch_phrase_dynamics(
     except ValueError:
         print(f"Invalid JSON for {language}.")
         return []
-
-    print(f"Response keys for {language}: {list(payload.keys())}")
-    if "results" in payload and payload["results"]:
-        print(f"First result for {language}: {payload['results'][0]}")
-    elif "results" in payload:
-        print(f"Results list is empty for {language}.")
 
     rows: list[dict] = []
     for item in payload.get("results", []):
@@ -137,7 +176,6 @@ def main() -> None:
     token = os.getenv("YANDEX_SEARCH_API_TOKEN") or os.getenv("YANDEX_WORDSTAT_TOKEN")
     auth_type = (os.getenv("YANDEX_SEARCH_API_AUTH_TYPE") or "bearer").strip().lower()
     folder_id = os.getenv("YANDEX_SEARCH_API_FOLDER_ID")
-    client_id = os.getenv("YANDEX_WORDSTAT_CLIENT_ID")
 
     if not token:
         raise ValueError(
@@ -150,19 +188,14 @@ def main() -> None:
     if not folder_id:
         raise ValueError("YANDEX_SEARCH_API_FOLDER_ID is missing in .env")
 
-    if not client_id:
-        print("Note: YANDEX_WORDSTAT_CLIENT_ID is not used by the current Yandex Cloud API.")
-    else:
-        print(
-            "Note: YANDEX_WORDSTAT_CLIENT_ID is present, "
-            "but the current script uses folderId instead."
-        )
+    languages = load_languages_from_pypl()
+    phrases = {language: build_phrase(language) for language in languages}
 
     session = create_session(token, auth_type)
     to_date = last_day_of_previous_month()
 
     all_rows: list[dict] = []
-    for language, phrase in LANGUAGE_PHRASES.items():
+    for language, phrase in phrases.items():
         rows = fetch_phrase_dynamics(session, language, phrase, START_DATE, to_date, folder_id)
         all_rows.extend(rows)
         print(f"Collected {len(rows)} monthly points for {language}.")
@@ -172,6 +205,7 @@ def main() -> None:
     raw_df.to_csv(RAW_DATA_PATH, index=False, encoding="utf-8")
 
     print(f"\nSaved raw Wordstat dynamics to: {RAW_DATA_PATH}")
+    print(f"Languages requested: {len(languages)}")
     print(f"Total rows collected: {len(raw_df)}")
 
 

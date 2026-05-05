@@ -41,19 +41,22 @@ def main() -> None:
     df = tables[0].copy()
     df.columns = [str(column).strip() for column in df.columns]
 
-    expected_columns = ["Date", "Go", "Java", "JavaScript", "Kotlin", "Python", "Rust"]
-    missing_columns = [column for column in expected_columns if column not in df.columns]
-    if missing_columns:
-        raise ValueError(
-            "The imported table is missing expected columns: "
-            + ", ".join(missing_columns)
-        )
+    if "Date" not in df.columns:
+        raise ValueError("The imported table must contain a 'Date' column.")
 
-    df = df[expected_columns].copy()
+    language_columns = [
+        column
+        for column in df.columns
+        if column != "Date" and not column.startswith("Unnamed:")
+    ]
+    if not language_columns:
+        raise ValueError("No language columns were found in the imported PYPL table.")
+
+    df = df[["Date", *language_columns]].copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"]).reset_index(drop=True)
 
-    for column in expected_columns[1:]:
+    for column in language_columns:
         df[column] = df[column].apply(clean_percent)
 
     df = df.rename(columns={"Date": "date"})
@@ -66,6 +69,8 @@ def main() -> None:
 
     print(f"Saved PYPL reference data to: {OUTPUT_CSV_PATH}")
     print(f"Rows saved: {len(df)}")
+    print(f"Languages imported: {len(language_columns)}")
+    print("Language columns:", language_columns)
     print(df.head())
     print(df.tail())
 

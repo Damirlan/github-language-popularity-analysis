@@ -12,4 +12,5 @@ data/*.csv
 
 # Generated images
 images/*.png
+!images/wordstat_vs_pypl_top10.png
 !images/.gitkeep

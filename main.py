@@ -157,8 +157,8 @@ def build_latest_ranking(monthly_index_df: pd.DataFrame) -> pd.DataFrame:
 def build_top10_ranking(latest_ranking_df: pd.DataFrame) -> pd.DataFrame:
     return (
         latest_ranking_df.sort_values(
-            ["yearly_trend_pp", "share_pct"],
-            ascending=[False, False],
+            ["share_pct"],
+            ascending=[False],
         )
         .head(TOP_LANGUAGE_COUNT)
         .reset_index(drop=True)
@@ -248,7 +248,7 @@ def plot_bar_chart(
     ylabel: str,
     output_path: Path,
 ) -> None:
-    chart_df = df.sort_values(metric, ascending=False)
+    chart_df = df.copy()
     plt.figure(figsize=(12, 6))
     plt.bar(chart_df["language"], chart_df[metric], color="steelblue")
     plt.title(title)
@@ -304,7 +304,7 @@ def create_visualizations(
         monthly_index_df,
         first_group,
         "count",
-        "Top 1-5 Promising Languages: Wordstat Query Counts",
+        "Top 1-5 Languages by Latest Share: Wordstat Query Counts",
         "Query count",
         RAW_COUNTS_TOP1_5_CHART,
     )
@@ -312,7 +312,7 @@ def create_visualizations(
         monthly_index_df,
         second_group,
         "count",
-        "Top 6-10 Promising Languages: Wordstat Query Counts",
+        "Top 6-10 Languages by Latest Share: Wordstat Query Counts",
         "Query count",
         RAW_COUNTS_TOP6_10_CHART,
     )
@@ -320,7 +320,7 @@ def create_visualizations(
         monthly_index_df,
         first_group,
         "smoothed_share_pct",
-        "Top 1-5 Promising Languages: Smoothed PYPL-like Share",
+        "Top 1-5 Languages by Latest Share: Smoothed PYPL-like Share",
         "Smoothed share, %",
         SMOOTHED_SHARE_TOP1_5_CHART,
     )
@@ -328,21 +328,21 @@ def create_visualizations(
         monthly_index_df,
         second_group,
         "smoothed_share_pct",
-        "Top 6-10 Promising Languages: Smoothed PYPL-like Share",
+        "Top 6-10 Languages by Latest Share: Smoothed PYPL-like Share",
         "Smoothed share, %",
         SMOOTHED_SHARE_TOP6_10_CHART,
     )
     plot_bar_chart(
         top10_ranking_df,
         "share_pct",
-        "Top 10 Promising Languages: Latest Month Share",
+        "Top 10 Languages by Latest Share: Latest Month Share",
         "Share, %",
         LATEST_SHARE_TOP10_CHART,
     )
     plot_bar_chart(
         top10_ranking_df,
         "yearly_trend_pp",
-        "Top 10 Promising Languages: Yearly Trend",
+        "Top 10 Languages by Latest Share: Yearly Trend",
         "Trend, percentage points per year",
         YEARLY_TREND_TOP10_CHART,
     )
@@ -388,7 +388,7 @@ def print_summary(summary: SummaryResult, top10_ranking_df: pd.DataFrame) -> Non
         f"- Highest average share over the whole period: {summary.highest_average_share_language} "
         f"({summary.highest_average_share_value:.2f}%)"
     )
-    print("- Top 10 promising languages used in charts:")
+    print("- Top 10 languages by latest share used in charts:")
     print("  " + ", ".join(top10_ranking_df["language"].tolist()))
     print("- Limitations:")
     print("  1. The source is Yandex Wordstat, not Google Trends.")

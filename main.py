@@ -15,6 +15,7 @@ RAW_DATA_PATH = DATA_DIR / "wordstat_dynamics_raw.csv"
 MONTHLY_INDEX_PATH = DATA_DIR / "wordstat_monthly_index.csv"
 LATEST_RANKING_PATH = DATA_DIR / "wordstat_latest_ranking.csv"
 TOP10_RANKING_PATH = DATA_DIR / "wordstat_top10_promising_languages.csv"
+PYPL_STYLE_TABLE_PATH = DATA_DIR / "wordstat_pypl_style_table.csv"
 
 RAW_COUNTS_TOP1_5_CHART = IMAGES_DIR / "wordstat_raw_counts_top_1_5.png"
 RAW_COUNTS_TOP6_10_CHART = IMAGES_DIR / "wordstat_raw_counts_top_6_10.png"
@@ -22,6 +23,7 @@ SMOOTHED_SHARE_TOP1_5_CHART = IMAGES_DIR / "wordstat_smoothed_share_top_1_5.png"
 SMOOTHED_SHARE_TOP6_10_CHART = IMAGES_DIR / "wordstat_smoothed_share_top_6_10.png"
 LATEST_SHARE_TOP10_CHART = IMAGES_DIR / "wordstat_latest_share_top10.png"
 YEARLY_TREND_TOP10_CHART = IMAGES_DIR / "wordstat_yearly_trend_top10.png"
+PYPL_STYLE_TABLE_IMAGE = IMAGES_DIR / "wordstat_pypl_style_table.png"
 
 BASE_LANGUAGE = "Java"
 SMOOTHING_WINDOW = 6
@@ -163,6 +165,59 @@ def build_top10_ranking(latest_ranking_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def build_pypl_style_table(monthly_index_df: pd.DataFrame) -> pd.DataFrame:
+    latest_month = monthly_index_df["date"].max()
+    previous_year_month = latest_month - pd.DateOffset(months=12)
+
+    current_df = (
+        monthly_index_df[monthly_index_df["date"] == latest_month][["language", "share_pct"]]
+        .copy()
+        .sort_values("share_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+    current_df["rank"] = range(1, len(current_df) + 1)
+
+    previous_df = (
+        monthly_index_df[monthly_index_df["date"] == previous_year_month][["language", "share_pct"]]
+        .copy()
+        .sort_values("share_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+    previous_df["previous_rank"] = range(1, len(previous_df) + 1)
+    previous_df = previous_df.rename(columns={"share_pct": "previous_share_pct"})
+
+    table_df = current_df.merge(previous_df, on="language", how="left")
+    table_df["rank_change"] = table_df["previous_rank"] - table_df["rank"]
+    table_df["one_year_trend_pct_points"] = table_df["share_pct"] - table_df["previous_share_pct"]
+
+    def format_change(value: float) -> str:
+        if pd.isna(value) or value == 0:
+            return "0"
+        return f"{int(value):+d}"
+
+    def format_trend(value: float) -> str:
+        if pd.isna(value):
+            return "n/a"
+        return f"{value:+.1f} %"
+
+    table_df["change"] = table_df["rank_change"].apply(format_change)
+    table_df["share"] = table_df["share_pct"].map(lambda value: f"{value:.2f} %")
+    table_df["1_year_trend"] = table_df["one_year_trend_pct_points"].apply(format_trend)
+
+    return table_df[
+        [
+            "rank",
+            "change",
+            "language",
+            "share",
+            "1_year_trend",
+            "share_pct",
+            "previous_share_pct",
+            "one_year_trend_pct_points",
+        ]
+    ].copy()
+
+
 def plot_language_group(
     monthly_index_df: pd.DataFrame,
     languages: list[str],
@@ -205,7 +260,42 @@ def plot_bar_chart(
     plt.close()
 
 
-def create_visualizations(monthly_index_df: pd.DataFrame, top10_ranking_df: pd.DataFrame) -> None:
+def render_pypl_style_table(table_df: pd.DataFrame) -> None:
+    display_df = table_df[["rank", "change", "language", "share", "1_year_trend"]].copy()
+    row_count = len(display_df)
+    fig_height = max(8, row_count * 0.35 + 1.5)
+
+    fig, ax = plt.subplots(figsize=(12, fig_height))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=display_df.values,
+        colLabels=["Rank", "Change", "Language", "Share", "1-year trend"],
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.2)
+
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#d9e8fb")
+        elif row % 2 == 0:
+            cell.set_facecolor("#f7f7f7")
+
+    plt.tight_layout()
+    plt.savefig(PYPL_STYLE_TABLE_IMAGE, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def create_visualizations(
+    monthly_index_df: pd.DataFrame,
+    top10_ranking_df: pd.DataFrame,
+    pypl_style_table_df: pd.DataFrame,
+) -> None:
     top_languages = top10_ranking_df["language"].tolist()
     first_group = top_languages[:MAX_LANGUAGES_PER_CHART]
     second_group = top_languages[MAX_LANGUAGES_PER_CHART:TOP_LANGUAGE_COUNT]
@@ -256,6 +346,7 @@ def create_visualizations(monthly_index_df: pd.DataFrame, top10_ranking_df: pd.D
         "Trend, percentage points per year",
         YEARLY_TREND_TOP10_CHART,
     )
+    render_pypl_style_table(pypl_style_table_df)
 
 
 def summarize_results(monthly_index_df: pd.DataFrame, latest_ranking_df: pd.DataFrame) -> SummaryResult:
@@ -313,18 +404,21 @@ def main() -> None:
     monthly_index_df = build_monthly_index(raw_df)
     latest_ranking_df = build_latest_ranking(monthly_index_df)
     top10_ranking_df = build_top10_ranking(latest_ranking_df)
+    pypl_style_table_df = build_pypl_style_table(monthly_index_df)
 
     monthly_index_df.to_csv(MONTHLY_INDEX_PATH, index=False, encoding="utf-8")
     latest_ranking_df.to_csv(LATEST_RANKING_PATH, index=False, encoding="utf-8")
     top10_ranking_df.to_csv(TOP10_RANKING_PATH, index=False, encoding="utf-8")
+    pypl_style_table_df.to_csv(PYPL_STYLE_TABLE_PATH, index=False, encoding="utf-8")
 
-    create_visualizations(monthly_index_df, top10_ranking_df)
+    create_visualizations(monthly_index_df, top10_ranking_df, pypl_style_table_df)
     summary = summarize_results(monthly_index_df, latest_ranking_df)
     print_summary(summary, top10_ranking_df)
 
     print(f"\nSaved processed monthly index to: {MONTHLY_INDEX_PATH}")
     print(f"Saved latest ranking to: {LATEST_RANKING_PATH}")
     print(f"Saved top-10 ranking to: {TOP10_RANKING_PATH}")
+    print(f"Saved PYPL-style table to: {PYPL_STYLE_TABLE_PATH}")
     print(f"Saved charts to: {IMAGES_DIR}")
 
 

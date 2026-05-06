@@ -102,14 +102,17 @@ github-language-popularity-analysis/
 │   ├── wordstat_dynamics_raw.csv
 │   ├── wordstat_monthly_index.csv
 │   ├── wordstat_latest_ranking.csv
-│   └── wordstat_top10_promising_languages.csv
+│   ├── wordstat_top10_promising_languages.csv
+│   └── wordstat_pypl_style_table.csv
 └── images/
     ├── wordstat_raw_counts_top_1_5.png
     ├── wordstat_raw_counts_top_6_10.png
     ├── wordstat_smoothed_share_top_1_5.png
     ├── wordstat_smoothed_share_top_6_10.png
     ├── wordstat_latest_share_top10.png
-    └── wordstat_yearly_trend_top10.png
+    ├── wordstat_yearly_trend_top10.png
+    ├── wordstat_pypl_style_table.png
+    └── wordstat_vs_pypl_top10.png
 ```
 
 ## Как запустить проект
@@ -169,6 +172,7 @@ python main.py
 - `data/wordstat_monthly_index.csv`
 - `data/wordstat_latest_ranking.csv`
 - `data/wordstat_top10_promising_languages.csv`
+- `data/wordstat_pypl_style_table.csv`
 - графики в папке `images/`
 
 ## Принцип отбора языков для графиков
@@ -189,8 +193,23 @@ python main.py
 - оценить динамику абсолютного числа tutorial-запросов по всем языкам;
 - рассчитать относительную долю интереса по всем языкам;
 - определить языки с самым сильным положительным трендом;
+- построить итоговую таблицу в формате, близком к таблице проекта `PYPL`;
 - сравнить полученный `PYPL-like` индекс с данными проекта `PYPL`;
 - сопоставить не только графики, но и численные метрики сходства.
+
+## PYPL-подобная итоговая таблица
+В проекте дополнительно строится таблица в стиле `PYPL`, которая сохраняется в двух видах:
+- `data/wordstat_pypl_style_table.csv`
+- `images/wordstat_pypl_style_table.png`
+
+Эта таблица содержит:
+- `Rank` — текущее место языка по доле интереса;
+- `Change` — изменение места языка по сравнению с той же точкой год назад;
+- `Language` — название языка;
+- `Share` — доля интереса в последнем месяце;
+- `1-year trend` — изменение доли интереса за год в процентных пунктах.
+
+Таким образом, помимо графиков, проект предоставляет компактную итоговую таблицу, напрямую сопоставимую по структуре с таблицей проекта `PYPL`.
 
 ## Сравнение с проектом PYPL
 Для сравнения с проектом `PYPL` в проект был добавлен эталонный файл `data/pypl_reference.csv`, а в ноутбуке реализовано:
